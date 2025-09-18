@@ -4,6 +4,8 @@ import time, os, sys
 import math
 import numpy as np
 import pandas as pd
+from io import BytesIO
+
 
 ROOT = pl.Path(__file__).parent          # repo folder at runtime
 DATA = ROOT / "data"                      # put small input files here in your repo
