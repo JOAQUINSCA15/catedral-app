@@ -1,24 +1,77 @@
 import streamlit as st
+import pathlib as pl
+import pandas as pd
+import time, os, sys
+
+st.set_page_config(page_title="Catedral", layout="wide")
+st.write("🟩 Checkpoint A: script started")
+
+ROOT = pl.Path(__file__).parent          # repo folder at runtime
+DATA = ROOT / "data"                      # put small input files here in your repo
+
+def _assert_exists(p: pl.Path):
+    if not p.exists():
+        st.error(f"❌ Missing file: `{p}`.\n\n"
+                 "Tip: commit the file to your repo and load it with a **relative** path, "
+                 "not a Windows path like `C:\\...`.")
+        st.stop()
+    return p
+
+@st.cache_data(show_spinner="Loading CSV...")
+def load_csv(rel_path: str) -> pd.DataFrame:
+    p = _assert_exists(DATA / rel_path)
+    return pd.read_csv(p)
+
+@st.cache_data(show_spinner="Loading Excel...")
+def load_excel(rel_path: str, sheet_name=0) -> pd.DataFrame:
+    p = _assert_exists(DATA / rel_path)
+    return pd.read_excel(p, sheet_name=sheet_name)
+
+@st.cache_resource(show_spinner="Initializing model/resources...")
+def init_model(*args, **kwargs):
+    # TODO: move heavy model loads here (was it happening at import time?)
+    # return your_model
+    return None
+
+st.write("🟩 Checkpoint B: before data/model load")
+print("B: before load", flush=True)
+
+# EXAMPLES — replace any absolute Windows paths with relative ones like below:
+# df = pd.read_csv(r"C:\Users\joaqu\OneDrive\...something.csv")        # ❌
+# df = load_csv("my_input.csv")                                        # ✅ file at repo/data/my_input.csv
+# xls = load_excel("workbook.xlsx", sheet_name="Sheet1")               # ✅
+
+# model = init_model()  # call only when needed
+st.write("🟩 Checkpoint C: after data/model load")
+print("C: after load", flush=True)
+
+# Continue building the UI…
+st.title("Catedral – Weekly Scheduler")
+st.write("🟩 Checkpoint D: UI building")
+
+
+
+#import streamlit as st
 
 # --- Guarded third-party imports with helpful messages ---
-try:
-    import pandas as pd
-except Exception as e:
-    st.error("Failed to import **pandas**. Please ensure it is installed.")
-    st.code("pip install pandas>=2.0")
-    st.stop()
+#try:
+#    import pandas as pd
+#except Exception as e:
+#    st.error("Failed to import **pandas**. Please ensure it is installed.")
+#    st.code("pip install pandas>=2.0")
+#    st.stop()
 
-try:
-    import numpy as np
-except Exception as e:
-    st.error("Failed to import **numpy**. Please ensure it is installed.")
-    st.code("pip install numpy")
-    st.stop()
+#try:
+#    import numpy as np
+#except Exception as e:
+#    st.error("Failed to import **numpy**. Please ensure it is installed.")
+#    st.code("pip install numpy")
+#    st.stop()
 
-import inspect
-from io import BytesIO
-import sys, os
-import math
+#import inspect
+#from io import BytesIO
+#import sys, os
+#import math
 
 # ------------------ Defaults ------------------
 DEFAULT_STAFF = [
