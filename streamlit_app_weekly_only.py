@@ -1,8 +1,10 @@
 import streamlit as st
 import pathlib as pl
-import pandas as pd
 import time, os, sys
 import math
+import numpy as np
+import pandas as pd
+
 
 st.set_page_config(page_title="Catedral", layout="wide")
 st.write("🟩 Checkpoint A: script started")
