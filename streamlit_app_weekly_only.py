@@ -5,12 +5,11 @@ import math
 import numpy as np
 import pandas as pd
 
-
-st.set_page_config(page_title="Catedral", layout="wide")
-st.write("🟩 Checkpoint A: script started")
-
 ROOT = pl.Path(__file__).parent          # repo folder at runtime
 DATA = ROOT / "data"                      # put small input files here in your repo
+
+st.set_page_config(page_title="Catedral", layout="wide")
+st.title("Catedral – Weekly Scheduler")
 
 def _assert_exists(p: pl.Path):
     if not p.exists():
@@ -35,22 +34,6 @@ def init_model(*args, **kwargs):
     # TODO: move heavy model loads here (was it happening at import time?)
     # return your_model
     return None
-
-st.write("🟩 Checkpoint B: before data/model load")
-print("B: before load", flush=True)
-
-# EXAMPLES — replace any absolute Windows paths with relative ones like below:
-# df = pd.read_csv(r"C:\Users\joaqu\OneDrive\...something.csv")        # ❌
-# df = load_csv("my_input.csv")                                        # ✅ file at repo/data/my_input.csv
-# xls = load_excel("workbook.xlsx", sheet_name="Sheet1")               # ✅
-
-# model = init_model()  # call only when needed
-st.write("🟩 Checkpoint C: after data/model load")
-print("C: after load", flush=True)
-
-# Continue building the UI…
-st.title("Catedral – Weekly Scheduler")
-st.write("🟩 Checkpoint D: UI building")
 
 
 
