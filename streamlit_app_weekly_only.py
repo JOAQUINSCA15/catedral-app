@@ -9,7 +9,7 @@ ROOT = pl.Path(__file__).parent          # repo folder at runtime
 DATA = ROOT / "data"                      # put small input files here in your repo
 
 st.set_page_config(page_title="Amorino Sevilla", layout="wide")
-st.title("Catedral – Weekly Scheduler")
+st.title("Amorino Sevilla – Weekly Scheduler")
 
 def _assert_exists(p: pl.Path):
     if not p.exists():
