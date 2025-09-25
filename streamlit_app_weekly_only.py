@@ -6,13 +6,15 @@ import numpy as np
 import pandas as pd
 from io import BytesIO
 
-
+# ------------------ Paths ------------------
 ROOT = pl.Path(__file__).parent          # repo folder at runtime
 DATA = ROOT / "data"                      # put small input files here in your repo
 
-st.set_page_config(page_title="Amorino Sevilla", layout="wide")
+# ------------------ Page config ------------------
+st.set_page_config(page_title="Amorino Sevilla – Weekly Scheduler", layout="wide")
 st.title("Amorino Sevilla – Weekly Scheduler")
 
+# ------------------ Helpers ------------------
 def _assert_exists(p: pl.Path):
     if not p.exists():
         st.error(f"❌ Missing file: `{p}`.\n\n"
@@ -37,29 +39,65 @@ def init_model(*args, **kwargs):
     # return your_model
     return None
 
+# === NEW: Robust upload reader for CSV/Excel with encoding & delimiter handling ===
+def read_table_resilient(
+    uploaded_file,
+    csv_sep=";",
+    csv_kwargs=None,
+    excel_kwargs=None,
+):
+    """
+    Reads an uploaded file object (Streamlit UploadedFile) as CSV or Excel.
+    - Sniffs Excel by magic bytes or extension.
+    - For CSV, tries common encodings and uses a fixed delimiter (default ';').
+    Returns (df, meta_str) or raises an Exception with a helpful message.
+    """
+    import io
 
+    if uploaded_file is None:
+        raise ValueError("No file provided")
 
-#import streamlit as st
+    csv_kwargs = csv_kwargs or {}
+    excel_kwargs = excel_kwargs or {}
 
-# --- Guarded third-party imports with helpful messages ---
-#try:
-#    import pandas as pd
-#except Exception as e:
-#    st.error("Failed to import **pandas**. Please ensure it is installed.")
-#    st.code("pip install pandas>=2.0")
-#    st.stop()
+    # Read raw bytes once
+    raw = uploaded_file.read()
+    name = getattr(uploaded_file, "name", "").lower()
 
-#try:
-#    import numpy as np
-#except Exception as e:
-#    st.error("Failed to import **numpy**. Please ensure it is installed.")
-#    st.code("pip install numpy")
-#    st.stop()
+    # Excel sniff
+    is_xlsx = raw[:2] == b"PK"  # ZIP container
+    is_xls  = raw[:8] == b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"  # BIFF
 
-#import inspect
-#from io import BytesIO
-#import sys, os
-#import math
+    if name.endswith((".xls", ".xlsx")) or is_xlsx or is_xls:
+        # Excel path
+        try:
+            if name.endswith(".xls") or is_xls:
+                df = pd.read_excel(io.BytesIO(raw), engine="xlrd", **excel_kwargs)
+                return df, "excel(.xls)"
+            else:
+                df = pd.read_excel(io.BytesIO(raw), engine="openpyxl", **excel_kwargs)
+                return df, "excel(.xlsx)"
+        except Exception as e:
+            raise RuntimeError(f"Excel parse failed: {e}") from e
+
+    # CSV path
+    encodings = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
+    last_err = None
+    for enc in encodings:
+        try:
+            df = pd.read_csv(io.BytesIO(raw), encoding=enc, sep=csv_sep, **csv_kwargs)
+            return df, f"csv({enc})"
+        except Exception as e:
+            last_err = e
+    # Final fallback: replace undecodable bytes
+    try:
+        text = raw.decode("latin-1", errors="replace")
+        df = pd.read_csv(io.StringIO(text), sep=csv_sep, **csv_kwargs)
+        return df, "csv(latin-1 with replacement)"
+    except Exception as e:
+        raise RuntimeError(
+            f"CSV parse failed. Last error: {last_err}\nFallback error: {e}"
+        ) from e
 
 # ------------------ Defaults ------------------
 DEFAULT_STAFF = [
@@ -243,30 +281,48 @@ def call_any_solver(opt_module, demand_df, staff_df, S, max_deviation):
     else:
         return {"raw_result": res, "status":"OK", "objective": float("nan")}
 
-# ------------------ Streamlit UI ------------------
-st.set_page_config(page_title="Shift Scheduler", layout="wide")
-st.title("Shift Scheduler (Streamlit + PuLP)")
-
+# ------------------ Labels ------------------
 SLOT_LABELS = ["10-11","11-12","12-13","13-14","14-15","15-16","16-17","17-18","18-19","19-20","20-21","21-22","22-23","23-00","00-01"]
 DAY_LABELS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 
+# ------------------ Sidebar UI ------------------
 with st.sidebar:
     st.header("Configuration")
     max_dev = st.number_input("Max deviation per slot (people)", min_value=0.0, value=2.5, step=0.5)
 
     st.markdown("---")
-    st.subheader("Demand CSV")
-    st.caption("Upload a 7x15 CSV (no header): rows=Mon..Sun, cols=15 hourly slots (10-11,...,00-01).")
-    demand_file = st.file_uploader("Upload sales_demand_template.csv", type=["csv"])
+    st.subheader("Demand file")
+    st.caption("Upload a 7×15 CSV/Excel (no header): rows=Mon..Sun, cols=15 hourly slots (10-11,...,00-01).")
+    demand_file = st.file_uploader("Upload sales_demand_template (CSV or Excel)", type=["csv", "xls", "xlsx"])
 
     st.markdown("---")
     st.subheader("Staff table")
     st.caption("Edit staff below. You can add or delete rows. Download/Upload to reuse.")
-    uploaded_staff = st.file_uploader("Upload staff CSV (optional)", type=["csv"], key="staff_csv")
+    uploaded_staff = st.file_uploader("Upload staff CSV/Excel (optional)", type=["csv", "xls", "xlsx"], key="staff_csv")
+
     if "staff_df" not in st.session_state:
         st.session_state["staff_df"] = pd.DataFrame(DEFAULT_STAFF)
+
     if uploaded_staff is not None:
-        st.session_state["staff_df"] = pd.read_csv(uploaded_staff)
+        try:
+            df_staff, meta = read_table_resilient(
+                uploaded_staff,
+                csv_sep=";",                 # set to ";" if your CSVs use semicolons
+                csv_kwargs={"on_bad_lines": "skip"},
+                excel_kwargs={},             # e.g., {"sheet_name": 0}
+            )
+            # Normalize possible alt headers
+            df_staff = df_staff.rename(columns={
+                "min work hour": "min_week_hours",
+                "max work hour": "max_week_hours",
+                "contract hours": "contract_hours",
+                "weekend only": "weekend_only",
+            })
+            st.session_state["staff_df"] = df_staff
+            st.success(f"Loaded staff from {meta}.")
+        except Exception as e:
+            st.error(f"Could not read staff file: {e}")
+
     if st.button("Load default staff (10)"):
         st.session_state["staff_df"] = pd.DataFrame(DEFAULT_STAFF)
 
@@ -289,11 +345,23 @@ with st.sidebar:
     staff_csv = staff_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download staff CSV", staff_csv, file_name="staff.csv", mime="text/csv")
 
-# Load demand (or demo)
+# ------------------ Demand load (or demo) ------------------
 if demand_file is not None:
-    demand = pd.read_csv(demand_file, header=None)
+    try:
+        df_demand, meta = read_table_resilient(
+            demand_file,
+            csv_sep=";",                 # change to "," if your CSVs are comma-separated
+            csv_kwargs={"header": None},
+            excel_kwargs={"header": None, "sheet_name": 0},
+        )
+        # Coerce all to numeric (errors -> NaN) and then fill NaN with 0
+        demand = df_demand.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        st.success(f"Loaded demand from {meta}.")
+    except Exception as e:
+        st.error(f"Could not read demand file: {e}")
+        st.stop()
 else:
-    st.info("Using a demo 7x15 demand matrix (no upload).")
+    st.info("Using a demo 7×15 demand matrix (no upload).")
     demand = pd.DataFrame(np.array([
         [0.00,0.89,1.08,1.15,2.51,3.11,2.16,4.06,1.64,1.45,1.31,2.68,2.73,2.14,0.86],
         [0.37,1.08,0.90,0.59,2.64,3.40,3.26,3.97,0.86,1.51,1.63,1.77,2.53,2.58,0.07],
@@ -304,12 +372,12 @@ else:
         [0.26,0.52,1.46,2.39,1.43,3.18,3.79,3.23,2.91,1.41,2.06,2.28,2.18,2.03,0.86],
     ]))
 
-# Validate shape
+# ------------------ Validate shape ------------------
 if demand.shape != (7,15):
-    st.error(f"Demand CSV must be 7 rows x 15 columns. Current shape: {demand.shape}")
+    st.error(f"Demand file must be 7 rows × 15 columns. Current shape: {demand.shape}")
     st.stop()
 
-# Build shift set for fallback path (used by generic solver call)
+# ------------------ Build shift set for fallback path ------------------
 T = list(range(1,16))
 if opt_mod is not None and hasattr(opt_mod, "build_shift_set"):
     try:
@@ -320,7 +388,6 @@ else:
     S = build_shift_set_fallback(T, 4, 8)
 
 # --------- Visualization helper (WEEKLY ONLY) ---------
-
 def render_weekly_demand_staffing_chart(coverage_df, SLOT_LABELS):
     st.markdown("### Weekly Demand vs Staffing (average per day)")
 
@@ -339,7 +406,6 @@ def render_weekly_demand_staffing_chart(coverage_df, SLOT_LABELS):
     st.line_chart(line_df)
 
     # Metrics: computed on daily values (not averages)
-    # Cap applies per day-slot, so we use daily deviations here
     max_abs_daily_dev = float((coverage_df["staffed"] - coverage_df["demand"]).abs().max())
     total_under_week = float((coverage_df["demand"] - coverage_df["staffed"]).clip(lower=0).sum())
     total_over_week  = float((coverage_df["staffed"] - coverage_df["demand"]).clip(lower=0).sum())
@@ -349,8 +415,7 @@ def render_weekly_demand_staffing_chart(coverage_df, SLOT_LABELS):
     c2.metric("Total under (week sum)", f"{total_under_week:.1f}")
     c3.metric("Total over (week sum)", f"{total_over_week:.1f}")
 
-
-# --------- Main action ---------
+# ------------------ Main action ------------------
 st.markdown("### Run Optimizer")
 if st.button("Solve now", type="primary"):
     with st.spinner("Solving..."):
