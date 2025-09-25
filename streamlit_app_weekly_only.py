@@ -13,7 +13,7 @@ DATA = ROOT / "data"                      # put small input files here in your r
 st.set_page_config(page_title="Amorino Sevilla – Weekly Scheduler", layout="wide")
 st.title("Amorino Sevilla – Weekly Scheduler")
 
-# ------------------ Helpers ------------------
+# ------------------ Basic file helpers ------------------
 def _assert_exists(p: pl.Path):
     if not p.exists():
         st.error(f"❌ Missing file: `{p}`.\n\n"
@@ -34,11 +34,10 @@ def load_excel(rel_path: str, sheet_name=0) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner="Initializing model/resources...")
 def init_model(*args, **kwargs):
-    # TODO: move heavy model loads here (was it happening at import time?)
-    # return your_model
+    # TODO: move heavy model loads here (if needed)
     return None
 
-# === Robust upload reader for CSV/Excel with encoding & delimiter handling ===
+# ------------------ Robust readers & normalizers ------------------
 def read_table_resilient(
     uploaded_file,
     csv_sep=";",
@@ -47,9 +46,9 @@ def read_table_resilient(
 ):
     """
     Reads an uploaded file object (Streamlit UploadedFile) as CSV or Excel.
-    - Sniffs Excel by magic bytes or extension.
-    - For CSV, tries common encodings and uses a fixed delimiter (default ';').
-    Returns (df, meta_str) or raises an Exception with a helpful message.
+    - Detects Excel by magic bytes/extension.
+    - For CSV, tries common encodings and uses provided delimiter (or sep=None to sniff).
+    Returns (df, meta_str) or raises.
     """
     import io
 
@@ -100,10 +99,10 @@ def read_table_resilient(
 
 def normalize_demand_to_7x15(df_in: pd.DataFrame) -> pd.DataFrame:
     """
-    Make whatever the user uploaded behave like a 7x15 numeric matrix:
+    Normalize uploaded demand into a 7x15 numeric matrix:
     - If it's 7x1 with delimited strings, split by ; , tab or |.
-    - If it's 15x7, transpose it.
-    - Strip empties, coerce numeric, and clip to 7 rows x 15 cols.
+    - If it's 15x7, transpose to 7x15.
+    - Coerce numerics, crop to 7 rows x 15 cols if larger.
     """
     df = df_in.copy()
 
@@ -114,7 +113,6 @@ def normalize_demand_to_7x15(df_in: pd.DataFrame) -> pd.DataFrame:
         best_sep = None
         best_hits = -1
         for sep in sep_candidates:
-            # approximate separator count per line (expect ~14 for 15 values)
             hits = s.str.count(re.escape(sep)).median(skipna=True)
             if hits > best_hits:
                 best_hits = hits
@@ -138,6 +136,85 @@ def normalize_demand_to_7x15(df_in: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def _normkey(s: str) -> str:
+    # lower, trim, remove non-alphanumerics: "Min work hour" -> "minworkhour"
+    return re.sub(r'[^a-z0-9]+', '', str(s).strip().lower())
+
+def normalize_staff_df(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize staff table to required schema:
+      columns: name, min_week_hours, max_week_hours, contract_hours, weekend_only
+    Accept common header variants, coerce types, dedupe, and fill safe defaults.
+    """
+    df = df_in.copy()
+
+    # Strip header whitespace and map common variants -> canonical names
+    df.columns = [str(c).strip() for c in df.columns]
+    rename_map = {}
+    for c in df.columns:
+        k = _normkey(c)
+        if k in {"name","worker","staff","staffname","employeename","employee","empleado"}:
+            rename_map[c] = "name"
+        elif k in {"minweekhours","minhours","min","minworkhour","minweeklyhours","minworkhours"}:
+            rename_map[c] = "min_week_hours"
+        elif k in {"maxweekhours","maxhours","max","maxworkhour","maxweeklyhours","maxworkhours"}:
+            rename_map[c] = "max_week_hours"
+        elif k in {"contracthours","contract","contracthour"}:
+            rename_map[c] = "contract_hours"
+        elif k in {"weekendonly","onlyweekend","isweekendonly","weekend"}:
+            rename_map[c] = "weekend_only"
+
+    df = df.rename(columns=rename_map)
+
+    # Hard requirement: a name column
+    if "name" not in df.columns:
+        raise ValueError("Staff file must include a 'name' column (e.g., Name / Worker / Employee).")
+
+    # Coerce numerics if present
+    for col in ["min_week_hours", "max_week_hours", "contract_hours"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Defaults derived from min_week_hours if missing
+    if "contract_hours" not in df.columns and "min_week_hours" in df.columns:
+        df["contract_hours"] = df["min_week_hours"]
+
+    if "max_week_hours" not in df.columns and "min_week_hours" in df.columns:
+        def _round_half_local(x):
+            try:
+                x = float(x)
+            except Exception:
+                x = 0.0
+            return math.floor(x*2+0.5)/2.0
+        df["max_week_hours"] = df["min_week_hours"].apply(lambda v: _round_half_local(min(40.0, (v or 0)*1.3)))
+
+    # weekend_only default
+    if "weekend_only" not in df.columns:
+        df["weekend_only"] = False
+
+    # Clean names, drop empties/dupes
+    df["name"] = df["name"].astype(str).str.strip()
+    df = df[df["name"] != ""]
+    df = df.drop_duplicates(subset=["name"])
+
+    # Fill NaNs for numerics
+    for col in ["min_week_hours", "max_week_hours", "contract_hours"]:
+        if col in df.columns:
+            df[col] = df[col].fillna(0).astype(float)
+
+    # Bool cast
+    df["weekend_only"] = df["weekend_only"].astype(bool)
+
+    # Reorder/ensure required columns exist
+    keep = ["name","min_week_hours","max_week_hours","contract_hours","weekend_only"]
+    for k in keep:
+        if k not in df.columns:
+            if k == "min_week_hours": df[k] = 0.0
+            if k == "max_week_hours": df[k] = 0.0
+            if k == "contract_hours": df[k] = 0.0
+            if k == "weekend_only": df[k] = False
+    return df[keep]
+
 # ------------------ Defaults ------------------
 DEFAULT_STAFF = [
     {"name":"Ana",           "min_week_hours":30},
@@ -158,7 +235,7 @@ for r in DEFAULT_STAFF:
     r["contract_hours"] = min_h
     r["weekend_only"] = False
 
-# --- Import optimizer module robustly ---
+# ------------------ Import optimizer robustly ------------------
 opt_mod = None
 opt_import_error = None
 try:
@@ -261,6 +338,7 @@ def adapt_to_user_optimizer(demand_df, staff_df, max_dev):
         total_hours = sum(1 for (w_, _, _) in schedule if w_ == w)
         hours_rows.append({"name": w, "total_hours": total_hours,
                            "min_week_hours": MinHw[w], "max_week_hours": MaxHw[w]})
+        # Note: contract_hours not needed for chart, but available in staff_df if needed
     out["hours_df"] = pd.DataFrame(hours_rows)
 
     # Assignments in slot form (each assigned slot as a 1-hour segment)
@@ -346,17 +424,11 @@ with st.sidebar:
         try:
             df_staff, meta = read_table_resilient(
                 uploaded_staff,
-                csv_sep=";",                 # adjust to "," if your CSVs are comma-separated
+                csv_sep=";",                 # change to "," if your CSVs use commas
                 csv_kwargs={"on_bad_lines": "skip"},
                 excel_kwargs={},             # e.g., {"sheet_name": 0}
             )
-            # Normalize possible alt headers
-            df_staff = df_staff.rename(columns={
-                "min work hour": "min_week_hours",
-                "max work hour": "max_week_hours",
-                "contract hours": "contract_hours",
-                "weekend only": "weekend_only",
-            })
+            df_staff = normalize_staff_df(df_staff)  # normalize headers & types
             st.session_state["staff_df"] = df_staff
             st.success(f"Loaded staff from {meta}.")
         except Exception as e:
@@ -390,7 +462,7 @@ if demand_file is not None:
         # Let pandas sniff delimiter for CSV; Excel handled automatically.
         df_demand, meta = read_table_resilient(
             demand_file,
-            csv_sep=None,                               # let pandas sniff
+            csv_sep=None,                               # let pandas sniff automatically
             csv_kwargs={"header": None, "engine": "python"},
             excel_kwargs={"header": None, "sheet_name": 0},
         )
@@ -463,6 +535,13 @@ def render_weekly_demand_staffing_chart(coverage_df, SLOT_LABELS):
 # ------------------ Main action ------------------
 st.markdown("### Run Optimizer")
 if st.button("Solve now", type="primary"):
+    # Ensure the editor didn’t leave us without required columns
+    try:
+        st.session_state["staff_df"] = normalize_staff_df(st.session_state["staff_df"])
+    except Exception as e:
+        st.error(f"Staff table is missing required columns: {e}")
+        st.stop()
+
     with st.spinner("Solving..."):
         # Prefer canonical adapter; else fallback generic caller
         res = adapt_to_user_optimizer(demand, st.session_state["staff_df"], max_dev)
