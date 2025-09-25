@@ -137,40 +137,114 @@ def normalize_demand_to_7x15(df_in: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _normkey(s: str) -> str:
-    # lower, trim, remove non-alphanumerics: "Min work hour" -> "minworkhour"
-    return re.sub(r'[^a-z0-9]+', '', str(s).strip().lower())
+    # Normalize header keys: remove BOM, lower, trim, strip non-alphanumerics
+    s = str(s).replace("\ufeff", "")  # remove BOM if present
+    return re.sub(r'[^a-z0-9]+', '', s.strip().lower())
+
+NAME_ALIASES = {
+    "name","worker","staff","staffname","employeename","employee","empleado","empleada",
+    "nombre","nom","nome","colaborador","trabajador","trabajadora","persona","operario",
+    "operator","resource","recurso"
+}
+MIN_ALIASES = {
+    "minweekhours","minhours","min","minworkhour","minweeklyhours","minworkhours",
+    "minsemana","horasmin","minh","oremin","minutasemana"
+}
+MAX_ALIASES = {
+    "maxweekhours","maxhours","max","maxworkhour","maxweeklyhours","maxworkhours",
+    "maxsemana","horasmax","maxh","oremax","maximasemana"
+}
+CONTRACT_ALIASES = {
+    "contracthours","contract","contracthour","contrato","horascontrato","orecontratto"
+}
+WEEKEND_ALIASES = {
+    "weekendonly","onlyweekend","isweekendonly","weekend","findesemana","solo finde","soloweekend"
+}
+
+def _try_promote_header_from_rows(df: pd.DataFrame, lookahead_rows: int = 5) -> pd.DataFrame:
+    """
+    If the current df.columns don't contain recognizable fields, try to use one
+    of the first few rows as the header. Returns possibly modified df.
+    """
+    current_norms = {_normkey(c) for c in df.columns}
+    if (current_norms & NAME_ALIASES) or (current_norms & MIN_ALIASES) or (current_norms & MAX_ALIASES):
+        return df
+
+    up_to = min(len(df), lookahead_rows)
+    for i in range(up_to):
+        row_vals = [str(x) for x in df.iloc[i].tolist()]
+        norms = {_normkey(x) for x in row_vals}
+        if (norms & NAME_ALIASES) or (norms & MIN_ALIASES) or (norms & MAX_ALIASES) or (norms & CONTRACT_ALIASES):
+            new_cols = [str(x).replace("\ufeff", "").strip() for x in df.iloc[i].tolist()]
+            df = df.iloc[i+1:].copy()
+            df.columns = new_cols
+            return df
+    return df
 
 def normalize_staff_df(df_in: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize staff table to required schema:
-      columns: name, min_week_hours, max_week_hours, contract_hours, weekend_only
-    Accept common header variants, coerce types, dedupe, and fill safe defaults.
+      required columns: name, min_week_hours, max_week_hours, contract_hours, weekend_only
+    - Robust header normalization (BOM/whitespace/punct)
+    - Auto-promote header row if needed
+    - Map multilingual/variant headers
+    - Combine first+last name if necessary
+    - Type coercion and safe defaults
     """
     df = df_in.copy()
 
-    # Strip header whitespace and map common variants -> canonical names
-    df.columns = [str(c).strip() for c in df.columns]
+    # If columns look like integers (no header), try promoting first row to header
+    if all(isinstance(c, (int, float)) for c in df.columns):
+        df = _try_promote_header_from_rows(df)
+
+    # Strip header whitespace, remove BOM
+    orig_cols = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+    df.columns = orig_cols
+
+    # If still no obvious headers, try again from first few rows
+    df = _try_promote_header_from_rows(df)
+
+    # Final column cleanup
+    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+
+    # Build rename map by normalized keys
     rename_map = {}
+    first_name_key = last_name_key = None
+
     for c in df.columns:
         k = _normkey(c)
-        if k in {"name","worker","staff","staffname","employeename","employee","empleado"}:
+        if k in NAME_ALIASES:
             rename_map[c] = "name"
-        elif k in {"minweekhours","minhours","min","minworkhour","minweeklyhours","minworkhours"}:
+        elif k in MIN_ALIASES:
             rename_map[c] = "min_week_hours"
-        elif k in {"maxweekhours","maxhours","max","maxworkhour","maxweeklyhours","maxworkhours"}:
+        elif k in MAX_ALIASES:
             rename_map[c] = "max_week_hours"
-        elif k in {"contracthours","contract","contracthour"}:
+        elif k in CONTRACT_ALIASES:
             rename_map[c] = "contract_hours"
-        elif k in {"weekendonly","onlyweekend","isweekendonly","weekend"}:
+        elif k in WEEKEND_ALIASES:
             rename_map[c] = "weekend_only"
+        elif k in {"firstname","first","nombredepila","nomeproprio","givenname"}:
+            first_name_key = c
+        elif k in {"lastname","last","apellidos","cognome","surname","apelido"}:
+            last_name_key = c
 
     df = df.rename(columns=rename_map)
 
+    # If no 'name' but we have first/last, compose it
+    if "name" not in df.columns and (first_name_key or last_name_key):
+        first = df[first_name_key].astype(str).str.strip() if first_name_key in df.columns else ""
+        last  = df[last_name_key].astype(str).str.strip()  if last_name_key in df.columns  else ""
+        composed = (first + " " + last).str.strip()
+        df["name"] = composed
+
+    # Debug help: show what we actually see
+    st.caption("Detected staff columns: " + ", ".join([f"'{c}'" for c in df.columns]))
+
     # Hard requirement: a name column
     if "name" not in df.columns:
-        raise ValueError("Staff file must include a 'name' column (e.g., Name / Worker / Employee).")
+        raise ValueError("Staff file must include a 'name' column (or First/Last to combine).")
 
-    # Coerce numerics if present
+    # Coerce numerics
     for col in ["min_week_hours", "max_week_hours", "contract_hours"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -193,7 +267,7 @@ def normalize_staff_df(df_in: pd.DataFrame) -> pd.DataFrame:
         df["weekend_only"] = False
 
     # Clean names, drop empties/dupes
-    df["name"] = df["name"].astype(str).str.strip()
+    df["name"] = df["name"].astype(str).str.replace("\ufeff","").str.strip()
     df = df[df["name"] != ""]
     df = df.drop_duplicates(subset=["name"])
 
@@ -338,7 +412,6 @@ def adapt_to_user_optimizer(demand_df, staff_df, max_dev):
         total_hours = sum(1 for (w_, _, _) in schedule if w_ == w)
         hours_rows.append({"name": w, "total_hours": total_hours,
                            "min_week_hours": MinHw[w], "max_week_hours": MaxHw[w]})
-        # Note: contract_hours not needed for chart, but available in staff_df if needed
     out["hours_df"] = pd.DataFrame(hours_rows)
 
     # Assignments in slot form (each assigned slot as a 1-hour segment)
@@ -424,10 +497,13 @@ with st.sidebar:
         try:
             df_staff, meta = read_table_resilient(
                 uploaded_staff,
-                csv_sep=";",                 # change to "," if your CSVs use commas
-                csv_kwargs={"on_bad_lines": "skip"},
-                excel_kwargs={},             # e.g., {"sheet_name": 0}
+                csv_sep=None,                  # let pandas sniff; many CSVs are comma, others semicolon
+                csv_kwargs={"on_bad_lines": "skip", "engine": "python"},
+                excel_kwargs={},               # e.g., {"sheet_name": 0}
             )
+            # Debug: raw columns before normalization
+            st.caption("Raw staff columns before normalization: " + ", ".join(map(str, df_staff.columns)))
+
             df_staff = normalize_staff_df(df_staff)  # normalize headers & types
             st.session_state["staff_df"] = df_staff
             st.success(f"Loaded staff from {meta}.")
