@@ -1,7 +1,6 @@
 import streamlit as st
 import pathlib as pl
-import time, os, sys
-import math
+import os, sys, math, re
 import numpy as np
 import pandas as pd
 from io import BytesIO
@@ -39,7 +38,7 @@ def init_model(*args, **kwargs):
     # return your_model
     return None
 
-# === NEW: Robust upload reader for CSV/Excel with encoding & delimiter handling ===
+# === Robust upload reader for CSV/Excel with encoding & delimiter handling ===
 def read_table_resilient(
     uploaded_file,
     csv_sep=";",
@@ -98,6 +97,46 @@ def read_table_resilient(
         raise RuntimeError(
             f"CSV parse failed. Last error: {last_err}\nFallback error: {e}"
         ) from e
+
+def normalize_demand_to_7x15(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Make whatever the user uploaded behave like a 7x15 numeric matrix:
+    - If it's 7x1 with delimited strings, split by ; , tab or |.
+    - If it's 15x7, transpose it.
+    - Strip empties, coerce numeric, and clip to 7 rows x 15 cols.
+    """
+    df = df_in.copy()
+
+    # If everything landed in a single column, try to split
+    if df.shape[1] == 1:
+        s = df.iloc[:, 0].astype(str).str.strip()
+        sep_candidates = [';', '\t', ',', '|']
+        best_sep = None
+        best_hits = -1
+        for sep in sep_candidates:
+            # approximate separator count per line (expect ~14 for 15 values)
+            hits = s.str.count(re.escape(sep)).median(skipna=True)
+            if hits > best_hits:
+                best_hits = hits
+                best_sep = sep
+        if best_sep is not None and best_hits >= 5:  # permissive threshold
+            df = s.str.split(best_sep, expand=True)
+
+    # Clean empty strings -> NaN
+    df = df.replace(r'^\s*$', np.nan, regex=True)
+
+    # Coerce to numeric
+    df = df.apply(pd.to_numeric, errors="coerce")
+
+    # If it's 15x7, transpose to 7x15
+    if df.shape == (15, 7):
+        df = df.T
+
+    # If it's larger, crop top-left 7x15
+    if df.shape[0] >= 7 and df.shape[1] >= 15:
+        df = df.iloc[:7, :15]
+
+    return df
 
 # ------------------ Defaults ------------------
 DEFAULT_STAFF = [
@@ -307,7 +346,7 @@ with st.sidebar:
         try:
             df_staff, meta = read_table_resilient(
                 uploaded_staff,
-                csv_sep=";",                 # set to ";" if your CSVs use semicolons
+                csv_sep=";",                 # adjust to "," if your CSVs are comma-separated
                 csv_kwargs={"on_bad_lines": "skip"},
                 excel_kwargs={},             # e.g., {"sheet_name": 0}
             )
@@ -348,15 +387,21 @@ with st.sidebar:
 # ------------------ Demand load (or demo) ------------------
 if demand_file is not None:
     try:
+        # Let pandas sniff delimiter for CSV; Excel handled automatically.
         df_demand, meta = read_table_resilient(
             demand_file,
-            csv_sep=";",                 # change to "," if your CSVs are comma-separated
-            csv_kwargs={"header": None},
+            csv_sep=None,                               # let pandas sniff
+            csv_kwargs={"header": None, "engine": "python"},
             excel_kwargs={"header": None, "sheet_name": 0},
         )
-        # Coerce all to numeric (errors -> NaN) and then fill NaN with 0
-        demand = df_demand.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-        st.success(f"Loaded demand from {meta}.")
+        demand = normalize_demand_to_7x15(df_demand)
+
+        # Final sanity: must be 7 x 15
+        if demand.shape != (7, 15):
+            raise ValueError(f"Demand file must be 7 rows × 15 columns after normalization, got {demand.shape}")
+
+        demand = demand.fillna(0.0)
+        st.success(f"Loaded demand from {meta}. Interpreted shape: {demand.shape}")
     except Exception as e:
         st.error(f"Could not read demand file: {e}")
         st.stop()
